@@ -65,6 +65,7 @@ python multitenantcloud-ctf.py
 
 #WINDOW
 Copy paste the multitenantcloud-ctf.py inside ur vscode installl the requirments and run then open localhost
+```
 
 🏆 Vulnerabilities
 Category	Vulnerabilities
