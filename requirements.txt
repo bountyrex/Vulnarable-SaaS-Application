@@ -1,0 +1,49 @@
+# Core Framework
+Flask==2.3.3
+Werkzeug==2.3.7
+
+# JWT Handling
+PyJWT==2.8.0
+
+# HTTP Requests
+requests==2.31.0
+urllib3==2.0.7
+
+# Database
+sqlite3  # Built-in with Python, no pip install needed
+
+# Security & Cryptography
+cryptography==41.0.7
+pycryptodome==3.19.0
+bcrypt==4.0.1
+
+# Data Processing
+python-dateutil==2.8.2
+pytz==2023.3
+
+# YAML Processing
+PyYAML==6.0.1
+
+# XML Processing
+defusedxml==0.7.1
+
+# Image Processing
+Pillow==10.1.0
+
+# Utility Libraries
+python-magic==0.4.27
+python-slugify==8.0.1
+colorama==0.4.6
+
+# Testing & Development
+pytest==7.4.3
+pytest-cov==4.1.0
+
+# Additional Security Testing
+bandit==1.7.5
+safety==2.4.0b2
+
+# Threading & Concurrency (for race condition exploits)
+threading  # Built-in with Python
+
+# Base64, JSON, Hashlib, etc. are built-in
