@@ -190,6 +190,8 @@ def init_db():
         last_found TIMESTAMP,
         ip_address TEXT
     )''')
+    
+    # Invites table
     c.execute('''CREATE TABLE IF NOT EXISTS invites (
         id INTEGER PRIMARY KEY,
         code TEXT UNIQUE,
@@ -199,6 +201,17 @@ def init_db():
         is_used INTEGER DEFAULT 0,
         secret_flag TEXT,
         is_hidden INTEGER DEFAULT 0
+    )''')
+    
+    # Reports table
+    c.execute('''CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY,
+        uid TEXT UNIQUE,
+        title TEXT,
+        content TEXT,
+        created_by TEXT,
+        created_at TIMESTAMP,
+        flag TEXT
     )''')
     
     # Insert tenants
@@ -234,21 +247,22 @@ def init_db():
         except:
             pass
     
-    # Insert resources
+    # ============ CLEAR OLD PROJECTS ============
+    # Delete all existing projects except the default Company Strategy
+    c.execute("DELETE FROM resources WHERE name != 'Company Strategy'")
+    
+    # Insert ONLY the default Company Strategy
     resources_data = [
-        (1, 1, 'Company Strategy', '{"plan": "Dominate market 2024"}', 1, 0, '2,3', None, now),
-        (2, 1, 'Secret Project', '{"name": "Project X"}', 2, 1, None, 'FLAG{1: RESOURCE_FLAG}', now),
-        (3, 2, 'Globex Secrets', '{"trade_secrets": "hidden"}', 4, 0, '5', 'FLAG{2: CROSS_TENANT_LEAK}', now),
-        (4, 3, 'Initech TPS Reports', '{"reports": "missing"}', 6, 1, None, 'FLAG{3: INITECH_SECRET}', now),
-        (5, 4, 'Master Secret', '{"ultimate_truth": "42"}', 8, 0, None, 'FLAG{4: MASTER_RESOURCE}', now)
+        (1, 1, 'Company Strategy', '{"plan": "Dominate market 2024", "uid": "uid-1file"}', 1, 0, '2,3', None, now),
     ]
     
     for resource in resources_data:
         try:
-            c.execute('INSERT OR IGNORE INTO resources VALUES (?,?,?,?,?,?,?,?,?)', resource)
+            c.execute('INSERT OR REPLACE INTO resources VALUES (?,?,?,?,?,?,?,?,?)', resource)
         except:
             pass
     
+    # Insert hidden invites
     hidden_invites = [
         ('INVITE_OWNER_f529c5de', 'owner', 'system', datetime.now().isoformat(), 'FLAG{INVITE_VULN}', 1),
         ('INVITE_ADMIN_8f3a9b2c', 'admin', 'system', datetime.now().isoformat(), None, 1),
@@ -262,10 +276,9 @@ def init_db():
         except:
             pass
 
+
     conn.commit()
     conn.close()
-
-init_db()
 
 def add_hidden_invites():
     """Add hidden invite codes to the database"""
@@ -694,7 +707,7 @@ def login_api():
 @app.route('/api/v1/user/profile/<int:user_id>', methods=['GET'])
 @token_required
 def get_user_profile_api(user_id):
-    """VULN: IDOR - Access any user's profile"""
+    """VULN: IDOR - Access any user's profile - flags hidden from GET"""
     conn = sqlite3.connect('multitenant.db')
     c = conn.cursor()
     c.execute('SELECT id, username, email, role, department, salary, ssn, credit_card, internal_notes FROM users WHERE id=?', (user_id,))
@@ -713,13 +726,37 @@ def get_user_profile_api(user_id):
         'salary': user[5],
         'ssn': user[6],
         'credit_card': user[7],
-        'internal_notes': user[8]
+        # Flag is NOT shown in GET response - hidden!
+        'internal_notes': '[REDACTED]' if user[8] and 'FLAG' in user[8] else user[8]
     }
     
-    if user_id != request.user['user_id'] and 'FLAG' in str(user[8]):
-        response['flag'] = user[8]
-    
+    # Flag is only returned in POST request to submit-flag endpoint
     return jsonify(response)
+
+
+@app.route('/api/v1/submit-flag', methods=['POST'])
+@token_required
+def submit_flag_for_profile():
+    """Submit flag found in profile - only here flags are revealed"""
+    data = request.get_json()
+    flag = data.get('flag')
+    username = request.user.get('username')
+    
+    # Check if this is a profile flag
+    profile_flags = {
+        "FLAG{8: INTERNAL_USER_NOTE}": "Found in john_doe's internal notes",
+        "FLAG{9: OWNER_NOTES}": "Found in jane_smith's internal notes",
+        "FLAG{10: GLOBEX_ADMIN}": "Found in admin_globex's profile",
+        "FLAG{11: INITECH_ADMIN_BACKDOOR}": "Found in michael_bolton's profile",
+        "FLAG{12: PETER_SPECIAL}": "Found in peter_gibbons's profile",
+        "FLAG{13: MASTER_ADMIN}": "Found in master_admin's profile"
+    }
+    
+    if flag in profile_flags or flag in FLAG_SCORES:
+        # Validate flag normally
+        return validate_flag()
+    
+    return jsonify({'error': 'Invalid flag'}), 400
 
 @app.route('/api/v1/user/profile', methods=['PUT'])
 @token_required
@@ -759,57 +796,81 @@ def update_profile_api():
 @app.route('/api/v1/projects/create', methods=['POST'])
 @token_required
 def create_project():
-    """Create project with UID - Race condition on limit 5"""
+    """Create project with auto-generated UID"""
     data = request.get_json()
     name = data.get('name')
-    custom_uid = data.get('uid', '')
-    username = request.user.get('username')
+    user_id = request.user['user_id']
+    
+    if not name:
+        return jsonify({'error': 'Project name required'}), 400
     
     conn = sqlite3.connect('multitenant.db')
     c = conn.cursor()
     
-    # Track project creations per user (VULN: Race condition)
-    if username not in project_creation_counter:
-        project_creation_counter[username] = 0
+    # Count projects for this user (excluding Company Strategy)
+    c.execute('SELECT COUNT(*) FROM resources WHERE owner_id=? AND name != "Company Strategy" AND name != "company strategy"', (user_id,))
+    current_count = c.fetchone()[0]
     
-    # Simulate delay for race condition
-    time.sleep(0.05)
+    print(f"[DEBUG] User {request.user['username']} has {current_count} projects")
     
-    project_creation_counter[username] += 1
-    
-    # Limit of 5 projects - but race condition allows bypass
-    if project_creation_counter[username] > 5:
+    # Strict limit check
+    if current_count >= 5:
         conn.close()
-        return jsonify({'error': 'Project limit reached (5 max)'}), 400
+        return jsonify({'error': f'Project limit reached (5 max). You have {current_count} projects.'}), 400
     
-    # Generate UID if not provided
-    if not custom_uid:
-        uid = f"uid-{secrets.randbelow(1000)}file"
+    # Generate UID automatically
+    c.execute('SELECT MAX(CAST(SUBSTR(uid, 5, LENGTH(uid)-11) AS INTEGER)) FROM resources WHERE uid LIKE "uid-%project"')
+    max_id = c.fetchone()[0]
+    if max_id:
+        new_id = max_id + 1
     else:
-        uid = custom_uid
+        new_id = 1
     
-    # Hidden flag for uid-150file
+    uid = f"uid-{new_id}project"
+    
+    # Hidden flag for uid-111project
     flag = None
-    if uid == "uid-150file":
-        flag = "FLAG{UID_150_SPECIAL}"
+    if uid == "uid-111project":
+        flag = "FLAG{UID_111PROJECT}"
     
-    c.execute('INSERT INTO resources (tenant_id, name, data, owner_id, internal_flag, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-              (g.tenant_id, name, json.dumps({'uid': uid}), request.user['user_id'], flag, datetime.now().isoformat()))
-    project_id = c.lastrowid
+    # Insert project
+    c.execute('''INSERT INTO resources (tenant_id, name, data, owner_id, internal_flag, created_at) 
+                 VALUES (?, ?, ?, ?, ?, ?)''',
+              (g.tenant_id, name, json.dumps({'uid': uid}), user_id, flag, datetime.now().isoformat()))
     
     conn.commit()
     conn.close()
     
-    return jsonify({'success': True, 'uid': uid, 'flag': flag})
+    response = {'success': True, 'uid': uid, 'message': f'Project "{name}" created with UID: {uid}'}
+    if flag:
+        response['flag'] = flag
+    
+    return jsonify(response)
+    return jsonify(response)
+
+@app.route('/api/v1/debug/clear-all-projects', methods=['POST'])
+def clear_all_projects():
+    """Clear all projects from database"""
+    conn = sqlite3.connect('multitenant.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM resources")
+    # Re-add only the default Company Strategy
+    now = datetime.now().isoformat()
+    c.execute('INSERT INTO resources (id, tenant_id, name, data, owner_id, is_public, share_with, internal_flag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+              (1, 1, 'Company Strategy', '{"plan": "Dominate market 2024", "uid": "uid-1file"}', 1, 0, '2,3', None, now))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Projects cleared! Only Company Strategy remains.'})
 
 
 @app.route('/api/v1/projects/list', methods=['GET'])
 @token_required
 def list_projects():
-    """List all projects - exposes UIDs"""
+    """List all projects for current user"""
     conn = sqlite3.connect('multitenant.db')
     c = conn.cursor()
-    c.execute('SELECT id, name, data, internal_flag FROM resources ORDER BY id')
+    # Only show projects owned by current user
+    c.execute('SELECT id, name, data FROM resources WHERE owner_id=? ORDER BY id', (request.user['user_id'],))
     projects = c.fetchall()
     conn.close()
     
@@ -819,8 +880,10 @@ def list_projects():
         data = json.loads(p[2]) if p[2] else {}
         uid = data.get('uid', f"uid-{p[0]}file")
         result.append({
-            'id': p[0], 'name': p[1], 'uid': uid, 
-            'icon': icons[p[0] % len(icons)], 'has_flag': bool(p[3])
+            'id': p[0], 
+            'name': p[1], 
+            'uid': uid, 
+            'icon': icons[p[0] % len(icons)],
         })
     return jsonify({'projects': result})
 
@@ -828,7 +891,7 @@ def list_projects():
 @app.route('/api/v1/projects/view/<uid>', methods=['GET'])
 @token_required
 def view_project(uid):
-    """View project by UID - IDOR vulnerability"""
+    """View project by UID - flag hidden from GET, only in POST"""
     conn = sqlite3.connect('multitenant.db')
     c = conn.cursor()
     c.execute('SELECT id, name, data, internal_flag FROM resources')
@@ -838,12 +901,35 @@ def view_project(uid):
     for p in projects:
         data = json.loads(p[2]) if p[2] else {}
         if data.get('uid') == uid or f"uid-{p[0]}file" == uid:
-            return jsonify({
-                'id': p[0], 'name': p[1], 'data': data,
-                'flag': p[3] if p[3] else None
-            })
+            response = {
+                'id': p[0], 
+                'name': p[1], 
+                'data': data,
+                # Flag is NOT shown in GET response - hidden!
+            }
+            # Only return flag info in the response if it's being submitted
+            return jsonify(response)
     
     return jsonify({'error': 'Project not found'}), 404
+
+
+@app.route('/api/v1/projects/check-flag', methods=['POST'])
+@token_required
+def check_project_flag():
+    """Check if a project UID contains a flag - POST only"""
+    data = request.get_json()
+    uid = data.get('uid')
+    
+    conn = sqlite3.connect('multitenant.db')
+    c = conn.cursor()
+    c.execute('SELECT internal_flag FROM resources WHERE data LIKE ?', (f'%"{uid}"%',))
+    result = c.fetchone()
+    conn.close()
+    
+    if result and result[0]:
+        return jsonify({'flag': result[0]})
+    
+    return jsonify({'error': 'No flag found'}), 404
 
 
 # ==================== REPORTS with IDOR ====================
@@ -1194,6 +1280,39 @@ def redeem_invite_protected():
 # Initialize redeem attempts counter
 redeem_attempts = {}
 
+@app.route('/api/v1/debug/create-test-user', methods=['GET'])
+def create_test_user():
+    """Create a test user for debugging"""
+    import hashlib
+    
+    conn = sqlite3.connect('multitenant.db')
+    c = conn.cursor()
+    
+    # Check if test user exists
+    c.execute("SELECT id FROM users WHERE username='test_user'")
+    existing = c.fetchone()
+    
+    if existing:
+        conn.close()
+        return jsonify({'message': 'Test user already exists', 'username': 'test_user', 'password': 'test123'})
+    
+    # Create test user
+    username = 'test_user'
+    password = 'test123'
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    now = datetime.now().isoformat()
+    
+    c.execute('''INSERT INTO users (id, tenant_id, username, email, password_hash, role, created_at) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?)''',
+              (99, 1, username, f'{username}@test.com', password_hash, 'admin', now))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'message': 'Test user created!',
+        'username': username,
+        'password': password
+    })
 
 # ==================== MASTER SECRETS with SQL Injection ====================
 @app.route('/api/v1/secrets/generate', methods=['GET'])
@@ -2323,12 +2442,8 @@ HTML_DASHBOARD = '''
             align-items: center;
             gap: 12px;
         }
-        .nav-item:hover {
-            background: rgba(102, 126, 234, 0.3);
-        }
-        .nav-item.active {
-            background: #667eea;
-        }
+        .nav-item:hover { background: rgba(102, 126, 234, 0.3); }
+        .nav-item.active { background: #667eea; }
         .nav-item .icon { font-size: 18px; width: 24px; }
         
         /* Main Content */
@@ -2347,10 +2462,6 @@ HTML_DASHBOARD = '''
         .security-stars {
             font-size: 12px;
             margin-top: 5px;
-            max-width: 100%;
-            overflow: hidden;
-            white-space: nowrap;
-            text-overflow: ellipsis;
         }
         .stats-grid {
             display: grid;
@@ -2541,6 +2652,17 @@ HTML_DASHBOARD = '''
             border: 1px solid #ddd;
             border-radius: 5px;
         }
+        .report-generate {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        .report-generate input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
         .import-result {
             margin-top: 15px;
             max-height: 300px;
@@ -2552,11 +2674,6 @@ HTML_DASHBOARD = '''
             border-radius: 5px;
             overflow-x: auto;
             font-size: 11px;
-        }
-        hr {
-            margin: 15px 0;
-            border: none;
-            border-top: 1px solid #eee;
         }
         .document-content {
             white-space: pre-wrap;
@@ -2570,17 +2687,6 @@ HTML_DASHBOARD = '''
             border-radius: 8px;
             border: 1px solid #e0e0e0;
         }
-        .report-generate {
-            margin-bottom: 15px;
-            display: flex;
-            gap: 10px;
-        }
-        .report-generate input {
-            flex: 1;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
         .warning {
             background: #fff3cd;
             color: #856404;
@@ -2588,6 +2694,14 @@ HTML_DASHBOARD = '''
             border-radius: 5px;
             margin-bottom: 10px;
             border-left: 4px solid #ffc107;
+        }
+        .invite-code {
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            margin-top: 10px;
+            display: none;
         }
     </style>
 </head>
@@ -2617,11 +2731,17 @@ HTML_DASHBOARD = '''
             <div class="nav-item" data-section="secrets">
                 <span class="icon">🔐</span> Master Secrets
             </div>
+            <div class="nav-item" data-section="invite">
+                <span class="icon">🎁</span> Invite System
+            </div>
             <div class="nav-item" data-section="team">
                 <span class="icon">👥</span> Team Members
             </div>
             <div class="nav-item" data-section="leaderboard">
                 <span class="icon">🏆</span> Leaderboard
+            </div>
+            <div class="nav-item" data-section="search">
+                <span class="icon">🔍</span> Search
             </div>
         </div>
     </div>
@@ -2635,11 +2755,11 @@ HTML_DASHBOARD = '''
         </div>
         
         <div class="stats-grid">
-            <div class="stat-card" onclick="document.getElementById('dashboard-section').scrollIntoView({behavior:'smooth'})">
+            <div class="stat-card">
                 <div class="stat-number" id="flagCount">{{ flag_count }}</div>
                 <div>Flags Found</div>
             </div>
-            <div class="stat-card" onclick="document.getElementById('dashboard-section').scrollIntoView({behavior:'smooth'})">
+            <div class="stat-card">
                 <div class="stat-number" id="totalScore">{{ score }}</div>
                 <div>Total Score</div>
             </div>
@@ -2654,9 +2774,9 @@ HTML_DASHBOARD = '''
         </div>
         
         {% if show_master_message and flag_count >= 8 %}
-        <div class="achievement-badge" id="masterAchievement">
+        <div class="achievement-badge">
             <span>🏆</span>
-            <span><strong>Master Hacker Unlocked!</strong> Admin Console Key: <code style="background:#333;padding:2px 6px;border-radius:4px;">CTF_MASTER_2024</code></span>
+            <span><strong>Master Hacker Unlocked!</strong> Admin Console Key: <code>CTF_MASTER_2024</code></span>
         </div>
         {% endif %}
         
@@ -2680,6 +2800,7 @@ HTML_DASHBOARD = '''
             <div id="projectsList"></div>
             <div class="limit-counter" id="projectLimitCounter"></div>
             <div class="warning" id="raceWarning" style="display:none;">⚠️ Race condition detected! Multiple requests bypassed the limit!</div>
+            <button onclick="raceExploit()" style="margin-top: 10px; background:#ff9800;">⚡ Test Race Condition (10x requests)</button>
         </div>
         
         <!-- Reports Section -->
@@ -2710,6 +2831,20 @@ HTML_DASHBOARD = '''
             <div id="secretResult"></div>
         </div>
         
+        <!-- Invite System Section -->
+        <div id="invite-section" class="section">
+            <h3>🎁 Invite System</h3>
+            <button onclick="generateInvite()">Generate Invite Code</button>
+            <div id="inviteResult" class="invite-code"></div>
+            <div style="margin-top: 10px;">
+                <input type="text" id="redeemCode" placeholder="Enter invite code to redeem" style="width: 70%;">
+                <button onclick="redeemInvite()">Redeem Code</button>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #666;">
+                <small>Redeem invites at: POST /api/invite/redeem</small>
+            </div>
+        </div>
+        
         <!-- Team Section -->
         <div id="team-section" class="section">
             <h3>👥 Team Management</h3>
@@ -2726,6 +2861,17 @@ HTML_DASHBOARD = '''
             <h3>🏆 Leaderboard</h3>
             <div id="leaderboardList">Loading...</div>
             <a href="/leaderboard" style="display: inline-block; margin-top: 15px; color: #667eea;">View Full Leaderboard →</a>
+        </div>
+        
+        <!-- Search Section -->
+        <div id="search-section" class="section">
+            <h3>🔍 Employee Directory Search</h3>
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="Search by username...">
+                <button onclick="searchUsers()">Search</button>
+            </div>
+            <div id="searchResults"></div>
+            <p style="font-size: 12px; color: #666; margin-top: 10px;">💡 Try searching with special characters like ' or UNION</p>
         </div>
     </div>
     
@@ -2788,7 +2934,7 @@ HTML_DASHBOARD = '''
             loadLeaderboard();
         }
         
-        // Project System with Race Condition
+        // Project System
         async function createProject() {
             const name = document.getElementById('projectName').value;
             if (!name) return alert('Enter project name');
@@ -2811,7 +2957,6 @@ HTML_DASHBOARD = '''
             loadProjects();
         }
         
-        // Race condition exploit helper
         async function raceExploit() {
             const name = prompt('Enter project name for race condition:', 'Race Project');
             if (!name) return;
@@ -2825,14 +2970,16 @@ HTML_DASHBOARD = '''
                 }));
             }
             const results = await Promise.all(promises);
+            let bypassDetected = false;
             for (const res of results) {
                 const data = await res.json();
-                if (data.race_bypass) {
-                    showNotification('🔥 RACE CONDITION SUCCESSFUL! You bypassed the 5-project limit!', 'success');
-                    document.getElementById('raceWarning').style.display = 'block';
-                    raceDetected = true;
-                    break;
-                }
+                if (data.race_bypass) bypassDetected = true;
+                if (data.flag) showNotification(`🎉 ${data.flag}`, 'success');
+            }
+            if (bypassDetected) {
+                showNotification('🔥 RACE CONDITION SUCCESSFUL! You bypassed the 5-project limit!', 'success');
+                document.getElementById('raceWarning').style.display = 'block';
+                raceDetected = true;
             }
             loadProjects();
         }
@@ -2846,16 +2993,11 @@ HTML_DASHBOARD = '''
                     let icon = '📁';
                     if (p.name.includes('Secret')) icon = '🔒';
                     else if (p.name.includes('Strategy')) icon = '📄';
-                    else if (p.name.includes('Globex')) icon = '📊';
-                    else if (p.name.includes('Initech')) icon = '🔐';
                     html += `<div class="project-item" onclick="viewProject('${p.uid}')">
                         <span>${icon} ${p.name}</span>
                         <span style="color:#999; font-size:11px;">${p.uid}</span>
                     </div>`;
                 });
-            }
-            if (!raceDetected && projectRequestCount >= 3) {
-                html += `<div style="margin-top: 10px;"><button onclick="raceExploit()" style="background:#ff9800;">⚡ Test Race Condition (10x requests)</button></div>`;
             }
             document.getElementById('projectsList').innerHTML = html || '<div class="loading">No projects yet. Create one!</div>';
         }
@@ -2863,14 +3005,11 @@ HTML_DASHBOARD = '''
         async function viewProject(uid) {
             const res = await fetch(`/api/v1/projects/view/${uid}`);
             const data = await res.json();
-            // Show only non-flag data in browser, flags only in POST response
-            const displayData = { ...data };
-            if (displayData.flag) delete displayData.flag;
-            alert(JSON.stringify(displayData, null, 2));
+            alert(JSON.stringify(data, null, 2));
             if (data.flag) showNotification(`🏆 Flag found! Submit at /leaderboard`, 'success');
         }
         
-        // Reports System
+        // Reports
         async function generateReport() {
             const title = document.getElementById('reportTitle').value;
             if (!title) return alert('Enter report title');
@@ -2881,10 +3020,7 @@ HTML_DASHBOARD = '''
                 body: JSON.stringify({ title: title })
             });
             const data = await res.json();
-            // Flag only appears in POST response, not in browser view
-            if (data.flag) {
-                showNotification(`🏆 Flag found: ${data.flag}`, 'success');
-            }
+            if (data.flag) showNotification(`🎉 ${data.flag}`, 'success');
             loadReports();
         }
         
@@ -2906,10 +3042,7 @@ HTML_DASHBOARD = '''
         async function viewReport(uid) {
             const res = await fetch(`/api/v1/reports/view/${uid}`);
             const data = await res.json();
-            // Hide flags from browser view
-            const displayData = { ...data };
-            if (displayData.flag) delete displayData.flag;
-            alert(JSON.stringify(displayData, null, 2));
+            alert(JSON.stringify(data, null, 2));
             if (data.flag) showNotification(`🏆 Flag found! Submit at /leaderboard`, 'success');
         }
         
@@ -2931,6 +3064,34 @@ HTML_DASHBOARD = '''
             if (data.flag) showNotification(`🏆 Flag: ${data.flag}`, 'success');
         }
         
+        // Invite System
+        async function generateInvite() {
+            const res = await fetch('/api/v1/invite/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role: 'viewer' })
+            });
+            const data = await res.json();
+            const inviteDiv = document.getElementById('inviteResult');
+            inviteDiv.innerHTML = `<strong>Invite Code:</strong> <code>${data.invite_code}</code><br><small>Share this code with new users</small>`;
+            inviteDiv.style.display = 'block';
+            setTimeout(() => inviteDiv.style.display = 'none', 10000);
+        }
+        
+        async function redeemInvite() {
+            const code = document.getElementById('redeemCode').value.trim();
+            if (!code) return showNotification('Enter an invite code!', 'error');
+            
+            const res = await fetch('/api/invite/redeem', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: code })
+            });
+            const data = await res.json();
+            if (data.flag) showNotification(`🎉 ${data.flag}`, 'success');
+            else showNotification(data.message, 'info');
+        }
+        
         // Team Management
         async function importTeamData() {
             const url = prompt('Enter import URL:');
@@ -2950,10 +3111,7 @@ HTML_DASHBOARD = '''
         async function exportTeamData() {
             const res = await fetch('/api/v1/team/export');
             const data = await res.json();
-            // Hide flags from export display
-            const exportData = { ...data };
-            if (exportData.flag) delete exportData.flag;
-            const blob = new Blob([JSON.stringify(exportData, null, 2)], {type: 'application/json'});
+            const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
@@ -2986,12 +3144,38 @@ HTML_DASHBOARD = '''
                     const data = await res.json();
                     if (data && !data.error) {
                         html += `<tr>
-                            <td>${data.id}  \n                             <td><a href="/profile/${data.id}">${data.username}</a>  \n                             <td>${data.role}  \n                             <td>${data.department || 'N/A'}  \n                             <td><button onclick="updateTeamMember(${data.id}, '${data.role}')" style="background:#ffc107;color:#333;">Update Role</button>  \n                         \n`;
+                            <td>${data.id}</td>
+                            <td><a href="/profile/${data.id}">${data.username}</a></td>
+                            <td>${data.role}</td>
+                            <td>${data.department || 'N/A'}</td>
+                            <td><button onclick="updateTeamMember(${data.id}, '${data.role}')" style="background:#ffc107;color:#333;">Update Role</button></td>
+                        </tr>`;
+                        if (data.internal_notes && data.internal_notes.includes('FLAG')) showNotification(`Found flag in ${data.username}'s profile!`, 'success');
                     }
                 } catch(e) { }
             }
-            html += '</tbody> \n';
+            html += '</tbody></table>';
             document.getElementById('teamList').innerHTML = html;
+        }
+        
+        // Search
+        async function searchUsers() {
+            const query = document.getElementById('searchInput').value;
+            const res = await fetch(`/api/v1/search/users?q=${encodeURIComponent(query)}`);
+            const data = await res.json();
+            
+            let html = '<ul>';
+            if (data.users && data.users.length > 0) {
+                data.users.forEach(u => {
+                    html += `<li>${u.username} (${u.email}) - ${u.role}</li>`;
+                });
+            } else {
+                html += '<li>No users found</li>';
+            }
+            html += '</ul>';
+            document.getElementById('searchResults').innerHTML = html;
+            
+            if (data.flag) showNotification(`🏆 Flag: ${data.flag}`, 'success');
         }
         
         // Leaderboard
@@ -3031,7 +3215,6 @@ HTML_DASHBOARD = '''
         loadTeamMembers();
         loadLeaderboard();
         
-        // Auto-refresh every 10 seconds
         setInterval(() => {
             loadLeaderboard();
             if (currentUser) loadTeamMembers();
@@ -3196,6 +3379,8 @@ HTML_LOGIN = '''
         <button onclick="login()">Login →</button>
         <div class="demo-users">
             <strong>Demo Users:</strong><br>
+            Create Those by going to this endpoint
+            <h4>http://localhost:5000/api/v1/debug/create-demo-users</h4>
             john_doe / Password123! (Admin)<br>
             jane_smith / Password456! (Owner)<br>
             bob_wilson / Password789! (Viewer)
@@ -3707,6 +3892,9 @@ HTML_PROFILE = '''
             border-radius: 5px;
             cursor: pointer;
         }
+        .hidden-flag {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -3726,11 +3914,8 @@ HTML_PROFILE = '''
             <p><strong>💳 Credit Card:</strong> {{ profile_user[7] }}</p>
         </div>
         
-        {% if profile_user[8] and 'FLAG' in profile_user[8] %}
-        <div class="info flag">
-            <p><strong>🏆 FLAG FOUND:</strong> {{ profile_user[8] }}</p>
-        </div>
-        {% endif %}
+        <!-- Flags are hidden - must be discovered through other means -->
+        <div class="hidden-flag" data-flag="{{ profile_user[8] if profile_user[8] and 'FLAG' in profile_user[8] else '' }}"></div>
         {% endif %}
         
         <button onclick="window.location.href='/dashboard'">Back to Dashboard</button>
@@ -4331,6 +4516,13 @@ def api_documentation():
             }
             .auth { background: #28a745; color: white; }
             .no-auth { background: #dc3545; color: white; }
+            .debug-section {
+                background: #f0f0f0;
+                border-left: 4px solid #ff9800;
+                padding: 15px;
+                margin: 15px 0;
+                border-radius: 5px;
+            }
         </style>
     </head>
     <body>
@@ -4359,7 +4551,7 @@ def api_documentation():
                         <pre>curl -X POST http://localhost:5000/api/v1/auth/login \\
   -H "Content-Type: application/json" \\
   -d '{"username":"john_doe","password":"Password123!"}'</pre>
-                        <div class="hint">💡 HINT: maybe this endpoint doesn't like single quotes</div>
+                        <div class="hint">💡 HINT: SQL injection might work here - try single quotes</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4367,7 +4559,7 @@ def api_documentation():
                         <span class="url">/api/v1/auth/refresh</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Refresh expired JWT token.</div>
-                        <div class="hint">💡 HINT: maybe the algorithm can be changed</div>
+                        <div class="hint">💡 HINT: Try changing the algorithm to 'none'</div>
                     </div>
                 </div>
                 
@@ -4380,7 +4572,7 @@ def api_documentation():
                         <span class="url">/api/v1/user/profile/{user_id}</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Retrieve user profile information by ID.</div>
-                        <div class="hint">💡 HINT: maybe changing the number shows something interesting</div>
+                        <div class="hint">💡 HINT: Try changing the ID to access other users (1-8)</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4388,7 +4580,7 @@ def api_documentation():
                         <span class="url">/api/v1/user/profile</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Update user profile information.</div>
-                        <div class="hint">💡 HINT: maybe you can update more than just your email</div>
+                        <div class="hint">💡 HINT: Try adding "role":"admin" to the request</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4396,7 +4588,7 @@ def api_documentation():
                         <span class="url">/api/v1/user/update-role</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Update user roles in the system.</div>
-                        <div class="hint">💡 HINT: maybe regular users can upgrade themselves</div>
+                        <div class="hint">💡 HINT: Regular users might upgrade themselves</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4404,7 +4596,7 @@ def api_documentation():
                         <span class="url">/api/v1/user/role/update</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Special role update endpoint with hidden parameters.</div>
-                        <div class="hint">💡 HINT: maybe there's a secret word that grants ultimate power</div>
+                        <div class="hint">💡 HINT: Try secret: "i_am_the_ultimate_hacker"</div>
                     </div>
                 </div>
                 
@@ -4421,7 +4613,7 @@ def api_documentation():
   -H "Authorization: Bearer YOUR_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{"name":"My Project"}'</pre>
-                        <div class="hint">💡 HINT: maybe if you send many requests at once, the limit doesn't work</div>
+                        <div class="hint">💡 HINT: Send multiple requests at once to bypass limit. Flag at uid-111project</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4429,7 +4621,7 @@ def api_documentation():
                         <span class="url">/api/v1/projects/list</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">List all projects with their UIDs.</div>
-                        <div class="hint">💡 HINT: maybe these UIDs follow a pattern</div>
+                        <div class="hint">💡 HINT: UIDs follow pattern uid-1project, uid-2project...</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4437,7 +4629,7 @@ def api_documentation():
                         <span class="url">/api/v1/projects/view/{uid}</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">View project details by UID.</div>
-                        <div class="hint">💡 HINT: maybe you can guess other UIDs like uid-111project</div>
+                        <div class="hint">💡 HINT: Try uid-111project</div>
                     </div>
                 </div>
                 
@@ -4454,7 +4646,7 @@ def api_documentation():
   -H "Authorization: Bearer YOUR_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{"title":"Q1 Report"}'</pre>
-                        <div class="hint">💡 HINT: maybe the response contains something special for certain UIDs</div>
+                        <div class="hint">💡 HINT: Flag at uid-111report</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4469,7 +4661,7 @@ def api_documentation():
                         <span class="url">/api/v1/reports/view/{uid}</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">View report details by UID.</div>
-                        <div class="hint">💡 HINT: maybe uid-111report has something hidden</div>
+                        <div class="hint">💡 HINT: Try uid-111report</div>
                     </div>
                 </div>
                 
@@ -4482,7 +4674,7 @@ def api_documentation():
                         <span class="url">/api/v1/strategy/view</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">View the company's strategic roadmap document.</div>
-                        <div class="hint">💡 HINT: maybe there's more than meets the eye in the document footer</div>
+                        <div class="hint">💡 HINT: Look at the document footer for encoded information</div>
                     </div>
                 </div>
                 
@@ -4496,36 +4688,7 @@ def api_documentation():
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Generate a master secret based on your name.</div>
                         <pre>curl -X GET "http://localhost:5000/api/v1/secrets/generate?name=john"</pre>
-                        <div class="hint">💡 HINT: maybe the name parameter doesn't like certain characters</div>
-                    </div>
-                </div>
-                
-                <!-- Tenant Resources Section -->
-                <div class="section">
-                    <h2>🏢 Tenant Resources</h2>
-                    
-                    <div class="endpoint">
-                        <span class="method GET">GET</span>
-                        <span class="url">/api/v1/tenant/resources/{resource_id}</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Access tenant resources by ID.</div>
-                        <div class="hint">💡 HINT: maybe resources from other tenants are accessible</div>
-                    </div>
-                    
-                    <div class="endpoint">
-                        <span class="method GET">GET</span>
-                        <span class="url">/api/v1/tenant/settings</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Get tenant configuration settings.</div>
-                        <div class="hint">💡 HINT: maybe the X-Tenant-ID header can be changed</div>
-                    </div>
-                    
-                    <div class="endpoint">
-                        <span class="method POST">POST</span>
-                        <span class="url">/api/v1/tenant/import</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Import resources from external URLs.</div>
-                        <div class="hint">💡 HINT: maybe localhost URLs work</div>
+                        <div class="hint">💡 HINT: Try SQL injection payloads like ' OR '1'='1'--</div>
                     </div>
                 </div>
                 
@@ -4538,7 +4701,8 @@ def api_documentation():
                         <span class="url">/api/v1/search/users</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Search for users by username.</div>
-                        <div class="hint">💡 HINT: maybe single quotes break the search</div>
+                        <pre>curl "http://localhost:5000/api/v1/search/users?q=john"</pre>
+                        <div class="hint">💡 HINT: Try ' UNION SELECT id,username,password_hash,role FROM users--</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4546,7 +4710,7 @@ def api_documentation():
                         <span class="url">/api/v1/query</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Custom query endpoint.</div>
-                        <div class="hint">💡 HINT: maybe operators like $ne work here</div>
+                        <div class="hint">💡 HINT: Try {"username": {"$ne": null}}</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4554,86 +4718,7 @@ def api_documentation():
                         <span class="url">/graphql</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">GraphQL API endpoint.</div>
-                        <div class="hint">💡 HINT: maybe asking for __schema reveals everything</div>
-                    </div>
-                </div>
-                
-                <!-- Administration Section -->
-                <div class="section">
-                    <h2>⚙️ Administration</h2>
-                    
-                    <div class="endpoint">
-                        <span class="method POST">POST</span>
-                        <span class="url">/api/v1/admin/delete-user/{user_id}</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Administrative user deletion.</div>
-                        <div class="hint">💡 HINT: maybe this endpoint doesn't check if you're an admin</div>
-                    </div>
-                    
-                    <div class="endpoint">
-                        <span class="method GET">GET</span>
-                        <span class="url">/api/v1/debug/audit-logs</span>
-                        <span class="badge no-auth">No Auth</span>
-                        <div class="description">View system audit logs.</div>
-                        <div class="hint">💡 HINT: maybe this shouldn't be public</div>
-                    </div>
-                    
-                    <div class="endpoint">
-                        <span class="method GET">GET</span>
-                        <span class="url">/api/v1/config/debug</span>
-                        <span class="badge no-auth">No Auth</span>
-                        <div class="description">Debug configuration endpoint.</div>
-                        <div class="hint">💡 HINT: maybe this leaks API keys</div>
-                    </div>
-                </div>
-                
-                <!-- Race Condition Section -->
-                <div class="section">
-                    <h2>⚡ Race Condition</h2>
-                    
-                    <div class="endpoint">
-                        <span class="method POST">POST</span>
-                        <span class="url">/api/v1/role/upgrade</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Upgrade role for eligible users.</div>
-                        <div class="hint">💡 HINT: maybe sending many requests at once works</div>
-                    </div>
-                    
-                    <div class="endpoint">
-                        <span class="method POST">POST</span>
-                        <span class="url">/api/v1/submit-flag-race</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Submit flags for scoring (vulnerable endpoint).</div>
-                        <div class="hint">💡 HINT: maybe after 8 flags, something changes</div>
-                    </div>
-                </div>
-                
-                <!-- Team Management Section -->
-                <div class="section">
-                    <h2>👥 Team Management</h2>
-                    
-                    <div class="endpoint">
-                        <span class="method POST">POST</span>
-                        <span class="url">/api/v1/team/import</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Import team data from URL.</div>
-                        <div class="hint">💡 HINT: maybe internal URLs work here</div>
-                    </div>
-                    
-                    <div class="endpoint">
-                        <span class="method GET">GET</span>
-                        <span class="url">/api/v1/team/export</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Export all team member data.</div>
-                        <div class="hint">💡 HINT: maybe this exports sensitive information</div>
-                    </div>
-                    
-                    <div class="endpoint">
-                        <span class="method POST">POST</span>
-                        <span class="url">/api/v1/team/update</span>
-                        <span class="badge auth">Auth Required</span>
-                        <div class="description">Update team member information.</div>
-                        <div class="hint">💡 HINT: maybe you can update more than just the role</div>
+                        <div class="hint">💡 HINT: Try { __schema { types { name } } }</div>
                     </div>
                 </div>
                 
@@ -4646,7 +4731,7 @@ def api_documentation():
                         <span class="url">/api/v1/invite/generate</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Generate invitation codes.</div>
-                        <div class="hint">💡 HINT: maybe there are hidden codes in the source</div>
+                        <div class="hint">💡 HINT: Hidden codes in page source: INVITE_OWNER_f529c5de, INVITE_ADMIN_8f3a9b2c, INVITE_MASTER_7e1d4c8f</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4654,7 +4739,8 @@ def api_documentation():
                         <span class="url">/api/invite/redeem</span>
                         <span class="badge no-auth">No Auth</span>
                         <div class="description">Redeem invitation codes.</div>
-                        <div class="hint">💡 HINT: maybe some codes are hiding in plain sight</div>
+                        <pre>curl -X POST http://localhost:5000/api/invite/redeem -d '{"code":"INVITE_OWNER_f529c5de"}'</pre>
+                        <div class="hint">💡 HINT: Redeem hidden codes for flags</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4662,7 +4748,7 @@ def api_documentation():
                         <span class="url">/api/invite/list</span>
                         <span class="badge no-auth">No Auth</span>
                         <div class="description">List all active invites.</div>
-                        <div class="hint">💡 HINT: maybe this endpoint is public</div>
+                        <div class="hint">💡 HINT: Exposes all invite codes</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4670,7 +4756,102 @@ def api_documentation():
                         <span class="url">/api/v1/invite/check</span>
                         <span class="badge no-auth">No Auth</span>
                         <div class="description">Check if an invite code is valid.</div>
-                        <div class="hint">💡 HINT: maybe the master invite is INVITE_MASTER_7e1d4c8f</div>
+                        <div class="hint">💡 HINT: Try INVITE_MASTER_7e1d4c8f</div>
+                    </div>
+                </div>
+                
+                <!-- Administration Section -->
+                <div class="section">
+                    <h2>⚙️ Administration</h2>
+                    
+                    <div class="endpoint">
+                        <span class="method POST">POST</span>
+                        <span class="url">/api/v1/admin/delete-user/{user_id}</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Administrative user deletion.</div>
+                        <div class="hint">💡 HINT: Try this as a regular user</div>
+                    </div>
+                    
+                    <div class="endpoint">
+                        <span class="method GET">GET</span>
+                        <span class="url">/api/v1/debug/audit-logs</span>
+                        <span class="badge no-auth">No Auth</span>
+                        <div class="description">View system audit logs.</div>
+                        <div class="hint">💡 HINT: No authentication required</div>
+                    </div>
+                    
+                    <div class="endpoint">
+                        <span class="method GET">GET</span>
+                        <span class="url">/api/v1/config/debug</span>
+                        <span class="badge no-auth">No Auth</span>
+                        <div class="description">Debug configuration endpoint.</div>
+                        <div class="hint">💡 HINT: Leaks API keys and secrets!</div>
+                    </div>
+                    
+                    <div class="endpoint">
+                        <span class="method GET">GET</span>
+                        <span class="url">/api/v1/tenant/settings</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Get tenant configuration settings.</div>
+                        <div class="hint">💡 HINT: Try changing X-Tenant-ID header</div>
+                    </div>
+                    
+                    <div class="endpoint">
+                        <span class="method POST">POST</span>
+                        <span class="url">/api/v1/tenant/import</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Import resources from external URLs.</div>
+                        <div class="hint">💡 HINT: Try http://localhost:5000/api/v1/config/debug</div>
+                    </div>
+                </div>
+                
+                <!-- Team Management Section -->
+                <div class="section">
+                    <h2>👥 Team Management</h2>
+                    
+                    <div class="endpoint">
+                        <span class="method POST">POST</span>
+                        <span class="url">/api/v1/team/import</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Import team data from URL.</div>
+                        <div class="hint">💡 HINT: SSRF vulnerability - try internal URLs</div>
+                    </div>
+                    
+                    <div class="endpoint">
+                        <span class="method GET">GET</span>
+                        <span class="url">/api/v1/team/export</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Export all team member data.</div>
+                        <div class="hint">💡 HINT: Exposes sensitive data like salaries and SSNs</div>
+                    </div>
+                    
+                    <div class="endpoint">
+                        <span class="method POST">POST</span>
+                        <span class="url">/api/v1/team/update</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Update team member information.</div>
+                        <div class="hint">💡 HINT: Try mass assignment to escalate privileges</div>
+                    </div>
+                </div>
+                
+                <!-- Race Condition Section -->
+                <div class="section">
+                    <h2>⚡ Race Condition</h2>
+                    
+                    <div class="endpoint">
+                        <span class="method POST">POST</span>
+                        <span class="url">/api/v1/role/upgrade</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Upgrade role for eligible users.</div>
+                        <div class="hint">💡 HINT: Send multiple requests at once</div>
+                    </div>
+                    
+                    <div class="endpoint">
+                        <span class="method POST">POST</span>
+                        <span class="url">/api/v1/submit-flag-race</span>
+                        <span class="badge auth">Auth Required</span>
+                        <div class="description">Submit flags for scoring (vulnerable endpoint).</div>
+                        <div class="hint">💡 HINT: After 8 flags, you can exploit race condition. Reach 10,000 points for ultimate flag!</div>
                     </div>
                 </div>
                 
@@ -4683,7 +4864,7 @@ def api_documentation():
                         <span class="url">/api/v1/special/secret</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Secret endpoint with special flag.</div>
-                        <div class="hint">💡 HINT: maybe it needs a special header</div>
+                        <div class="hint">💡 HINT: Try header X-Secret-Key: clap_if_you_find_this</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4691,7 +4872,64 @@ def api_documentation():
                         <span class="url">/admin-panel</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">CTF Admin Control Panel.</div>
-                        <div class="hint">💡 HINT: maybe you need a key after 8 flags</div>
+                        <div class="hint">💡 HINT: Needs key CTF_MASTER_2024 (revealed after 8 flags)</div>
+                    </div>
+                </div>
+                
+                <!-- Debug Endpoints Section -->
+                <div class="section">
+                    <h2>🐛 Debug Endpoints</h2>
+                    
+                    <div class="debug-section">
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method GET">GET</span>
+                            <span class="url">/api/v1/debug/create-test-user</span>
+                            <div class="description">Create a test user for debugging.</div>
+                            <div class="hint">💡 Creates user: test_user / test123 (admin role)</div>
+                        </div>
+                        
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method GET">GET</span>
+                            <span class="url">/api/v1/debug/create-demo-users</span>
+                            <div class="description">Create all demo users (john_doe, jane_smith, bob_wilson).</div>
+                            <div class="hint">💡 Run this first to populate database with users</div>
+                        </div>
+                        
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method GET">GET</span>
+                            <span class="url">/api/v1/debug/list-all-users</span>
+                            <div class="description">List all users in database.</div>
+                        </div>
+                        
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method POST">POST</span>
+                            <span class="url">/api/v1/debug/clear-projects</span>
+                            <div class="description">Clear all user-created projects.</div>
+                        </div>
+                        
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method GET">GET</span>
+                            <span class="url">/api/v1/debug/check-users</span>
+                            <div class="description">Check users in database with password hashes.</div>
+                        </div>
+                        
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method POST">POST</span>
+                            <span class="url">/api/v1/debug/reset-db</span>
+                            <div class="description">⚠️ WARNING: Delete and recreate database.</div>
+                        </div>
+                        
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method GET">GET</span>
+                            <span class="url">/api/v1/debug/table-schema</span>
+                            <div class="description">Check the users table schema.</div>
+                        </div>
+                        
+                        <div class="endpoint" style="border-left-color: #ff9800;">
+                            <span class="method GET">GET</span>
+                            <span class="url">/api/v1/debug/list-projects</span>
+                            <div class="description">List all projects for debugging.</div>
+                        </div>
                     </div>
                 </div>
                 
@@ -4727,7 +4965,7 @@ def api_documentation():
                         <span class="url">/api/v1/admin/ctf/reset</span>
                         <span class="badge auth">Auth Required</span>
                         <div class="description">Reset entire CTF (clears all flags).</div>
-                        <div class="hint">💡 HINT: needs X-Admin-Key header</div>
+                        <div class="hint">💡 HINT: Needs X-Admin-Key: CTF_MASTER_2024</div>
                     </div>
                     
                     <div class="endpoint">
@@ -4748,13 +4986,32 @@ def api_documentation():
                 <div class="note">
                     <strong>🔑 Authentication:</strong> Most endpoints require a JWT token. Include it in the Authorization header:<br>
                     <code>Authorization: Bearer &lt;your_token&gt;</code><br><br>
-                    <strong>📜 Flag Format:</strong> All flags follow the format: <code>FLAG{...}</code><br><br>
+                    
+                    <strong>📜 ALL FLAGS:</strong><br>
+                    • <code>FLAG{UID_111PROJECT}</code> - Create project with UID uid-111project<br>
+                    • <code>FLAG{REPORT_UID_111}</code> - Generate report with UID uid-111report<br>
+                    • <code>FLAG{8: INTERNAL_USER_NOTE}</code> - Found in john_doe's profile (submit via POST)<br>
+                    • <code>FLAG{9: OWNER_NOTES}</code> - Found in jane_smith's profile<br>
+                    • <code>FLAG{10: GLOBEX_ADMIN}</code> - Found in admin_globex's profile<br>
+                    • <code>FLAG{11: INITECH_ADMIN_BACKDOOR}</code> - Found in michael_bolton's profile<br>
+                    • <code>FLAG{12: PETER_SPECIAL}</code> - Found in peter_gibbons's profile<br>
+                    • <code>FLAG{13: MASTER_ADMIN}</code> - Found in master_admin's profile<br>
+                    • <code>FLAG{INVITE_VULN}</code> - Redeem INVITE_OWNER_f529c5de<br>
+                    • <code>FLAG{INVITE_MASTER_DISCOVERED}</code> - Check INVITE_MASTER_7e1d4c8f<br>
+                    • <code>FLAG{STRATEGY_BASE64_HIDDEN}</code> - Decode base64 in strategy document footer<br>
+                    • <code>FLAG{SQL_INJECTION_MASTER}</code> - SQL injection in secrets generator<br>
+                    • <code>FLAG{TEAM_IMPORT_SSRF}</code> - SSRF in team import<br>
+                    • <code>FLAG{TEAM_EXPORT_LEAK}</code> - Team export data leak<br>
+                    • <code>FLAG{TEAM_UPDATE_ESCALATION}</code> - Mass assignment in team update<br>
+                    • <code>FLAG{ULTIMATE_RACE_CONDITION_MASTER}</code> - Reach 10,000 points via race condition<br><br>
+                    
                     <strong>💡 Pro Tips:</strong>
                     <ul>
-                        <li>Check the page source for hidden comments</li>
-                        <li>Some endpoints have rate limits that can be bypassed</li>
-                        <li>IDs and UIDs follow predictable patterns</li>
-                        <li>After finding 8 flags, a special key is revealed</li>
+                        <li>Check the page source (Ctrl+U) for hidden comments with invite codes</li>
+                        <li>Some endpoints have rate limits that can be bypassed with concurrent requests</li>
+                        <li>IDs and UIDs follow predictable patterns (uid-1project, uid-2project, etc.)</li>
+                        <li>After finding 8 flags, a special admin key is revealed on the dashboard</li>
+                        <li>Flags are hidden from GET requests - you must submit them via POST to /api/v1/submit-flag</li>
                     </ul>
                 </div>
             </div>
