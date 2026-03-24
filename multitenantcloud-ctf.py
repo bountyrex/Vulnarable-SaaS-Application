@@ -4986,25 +4986,7 @@ def api_documentation():
                 <div class="note">
                     <strong>🔑 Authentication:</strong> Most endpoints require a JWT token. Include it in the Authorization header:<br>
                     <code>Authorization: Bearer &lt;your_token&gt;</code><br><br>
-                    
-                    <strong>📜 ALL FLAGS:</strong><br>
-                    • <code>FLAG{UID_111PROJECT}</code> - Create project with UID uid-111project<br>
-                    • <code>FLAG{REPORT_UID_111}</code> - Generate report with UID uid-111report<br>
-                    • <code>FLAG{8: INTERNAL_USER_NOTE}</code> - Found in john_doe's profile (submit via POST)<br>
-                    • <code>FLAG{9: OWNER_NOTES}</code> - Found in jane_smith's profile<br>
-                    • <code>FLAG{10: GLOBEX_ADMIN}</code> - Found in admin_globex's profile<br>
-                    • <code>FLAG{11: INITECH_ADMIN_BACKDOOR}</code> - Found in michael_bolton's profile<br>
-                    • <code>FLAG{12: PETER_SPECIAL}</code> - Found in peter_gibbons's profile<br>
-                    • <code>FLAG{13: MASTER_ADMIN}</code> - Found in master_admin's profile<br>
-                    • <code>FLAG{INVITE_VULN}</code> - Redeem INVITE_OWNER_f529c5de<br>
-                    • <code>FLAG{INVITE_MASTER_DISCOVERED}</code> - Check INVITE_MASTER_7e1d4c8f<br>
-                    • <code>FLAG{STRATEGY_BASE64_HIDDEN}</code> - Decode base64 in strategy document footer<br>
-                    • <code>FLAG{SQL_INJECTION_MASTER}</code> - SQL injection in secrets generator<br>
-                    • <code>FLAG{TEAM_IMPORT_SSRF}</code> - SSRF in team import<br>
-                    • <code>FLAG{TEAM_EXPORT_LEAK}</code> - Team export data leak<br>
-                    • <code>FLAG{TEAM_UPDATE_ESCALATION}</code> - Mass assignment in team update<br>
-                    • <code>FLAG{ULTIMATE_RACE_CONDITION_MASTER}</code> - Reach 10,000 points via race condition<br><br>
-                    
+
                     <strong>💡 Pro Tips:</strong>
                     <ul>
                         <li>Check the page source (Ctrl+U) for hidden comments with invite codes</li>
