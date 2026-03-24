@@ -21,6 +21,8 @@
 
 ---
 
+I Chellenge You To Get 10K Points
+
 ## 🚀 Features
 
 - **Multi-Tenant Architecture** - Simulates real-world SaaS platforms
