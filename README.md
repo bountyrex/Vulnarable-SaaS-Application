@@ -78,3 +78,6 @@ Copy paste the multitenantcloud-ctf.py inside ur vscode installl the requirments
 - Injection Attacks	SQL, NoSQL, SSRF
 - Information Disclosure	Secret exposure, Debug endpoints, GraphQL
 - Auth Bypass	JWT algorithm confusion, Invite backdoor
+
+Feel free to email me for bug inside it or want help abou the CTF
+testbounty239@gmail.com
