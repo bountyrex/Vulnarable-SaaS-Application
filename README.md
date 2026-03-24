@@ -60,6 +60,8 @@
 # Clone the repository
 https://github.com/bountyrex/Vulnarable-SaaS-Application.git
 cd multitenantcloud-ctf
+install the requirments
+pip install -r requirements.txt
 # Run the application
 python multitenantcloud-ctf.py
 
