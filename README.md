@@ -67,10 +67,10 @@ python multitenantcloud-ctf.py
 Copy paste the multitenantcloud-ctf.py inside ur vscode installl the requirments and run then open localhost
 ```
 
-🏆 Vulnerabilities
-Category	Vulnerabilities
-Race Conditions	Project creation, Flag submission, Role upgrade
-Broken Access Control	IDOR, BFLA, BPLA, Mass Assignment
-Injection Attacks	SQL, NoSQL, SSRF
-Information Disclosure	Secret exposure, Debug endpoints, GraphQL
-Auth Bypass	JWT algorithm confusion, Invite backdoor
+# 🏆 Vulnerabilities
+- Category	Vulnerabilities
+- Race Conditions	Project creation, Flag submission, Role upgrade
+- Broken Access Control	IDOR, BFLA, BPLA, Mass Assignment
+- Injection Attacks	SQL, NoSQL, SSRF
+- Information Disclosure	Secret exposure, Debug endpoints, GraphQL
+- Auth Bypass	JWT algorithm confusion, Invite backdoor
